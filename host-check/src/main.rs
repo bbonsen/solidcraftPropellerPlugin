@@ -41,6 +41,10 @@ fn main() {
         ("ducted-fan", "12 blades, no duct", json!({"blades": 12, "duct": false, "diameter": 120, "pitch": 90})),
         ("ducted-fan", "40 sections, 60 points", json!({"sections": 40, "section_points": 60})),
         ("wind-turbine", "bad: 40 sections", json!({"sections": 40})),
+        ("toroidal", "defaults", json!({})),
+        ("toroidal", "4 loops, cw, 45 sections", json!({"loops": 4, "rotation": "cw", "sections": 45})),
+        ("toroidal-marine", "defaults", json!({})),
+        ("toroidal-marine", "bad: spread 1.5", json!({"spread": 1.5})),
     ];
     for (entry, label, params) in cases {
         let (host, result) = craft_plugin_wasm::run(Recorder::default(), &manifest, &wasm, entry, &params);
@@ -52,7 +56,7 @@ fn main() {
         println!("   calls ({}): {}", host.calls.len(), counts.iter().map(|(c, n)| format!("{c}×{n}")).collect::<Vec<_>>().join(", "));
         match result {
             Ok(v) => {
-                let keep = ["bodies", "diameter_mm", "hub_diameter_mm", "hub_length_mm", "pitch_at_75_mm", "blade_angle_at_75_deg", "blade_area_ratio", "design_rpm", "duct", "warnings"];
+                let keep = ["loops", "spread_deg", "bodies", "diameter_mm", "hub_diameter_mm", "hub_length_mm", "pitch_at_75_mm", "blade_angle_at_75_deg", "blade_area_ratio", "design_rpm", "duct", "warnings"];
                 let short: serde_json::Map<String, Value> = v.as_object().unwrap().iter().filter(|(k, _)| keep.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
                 println!("   result: {}", Value::Object(short));
             }

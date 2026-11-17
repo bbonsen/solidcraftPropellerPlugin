@@ -5,7 +5,7 @@
 //! cargo run --example icons
 use propellers::blade::{bounds, placed};
 use propellers::design::Rotor;
-use propellers::{design, Kind};
+use propellers::{design, toroid_design, Kind};
 use serde_json::json;
 use std::f64::consts::PI;
 use std::fmt::Write;
@@ -77,12 +77,52 @@ fn icon(kind: Kind, params: serde_json::Value, blades: u32, duct: bool) -> Strin
     format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">{body}</svg>"#)
 }
 
+/// A toroidal propeller seen along its axis: each loop's outline, from the extremes of every
+/// section across the loop's centreline.
+fn toroid_icon(marine: bool, params: serde_json::Value) -> String {
+    let t = toroid_design(marine, &params).expect("defaults");
+    let l = t.design().expect("defaults build");
+    let scale = (27.0 - STROKE / 2.0) / (t.diameter / 2.0);
+    let world: Vec<Vec<[f64; 2]>> =
+        l.sections.iter().map(|((o, x, y), pts)| pts.iter().map(|p| [o[0] + p[0] * x[0] + p[1] * y[0], o[1] + p[0] * x[1] + p[1] * y[1]]).collect()).collect();
+    let origins: Vec<[f64; 2]> = l.sections.iter().map(|((o, ..), _)| [o[0], o[1]]).collect();
+    let (mut outer, mut inner) = (Vec::new(), Vec::new());
+    for (k, pts) in world.iter().enumerate() {
+        let (a, b) = (origins[k.saturating_sub(1)], origins[(k + 1).min(origins.len() - 1)]);
+        let (tx, ty) = (b[0] - a[0], b[1] - a[1]);
+        let n = [-ty, tx];
+        let key = |p: &[f64; 2]| p[0] * n[0] + p[1] * n[1];
+        let hi = pts.iter().copied().fold(pts[0], |m, p| if key(&p) > key(&m) { p } else { m });
+        let lo = pts.iter().copied().fold(pts[0], |m, p| if key(&p) < key(&m) { p } else { m });
+        outer.push(hi);
+        inner.push(lo);
+    }
+    let mut body = String::new();
+    for k in 0..t.loops {
+        let a = PI / 2.0 + 2.0 * PI * f64::from(k) / f64::from(t.loops);
+        let (s, c) = a.sin_cos();
+        let place = |p: &[f64; 2]| [32.0 + scale * (p[0] * c - p[1] * s), 32.0 - scale * (p[0] * s + p[1] * c)];
+        for side in [&outer, &inner] {
+            let pts: Vec<[f64; 2]> = side.iter().map(place).collect();
+            let _ = write!(
+                body,
+                r#"<path d="{}" fill="none" stroke="currentColor" stroke-width="{STROKE}" stroke-linejoin="round" stroke-linecap="round"/>"#,
+                path(&pts, false)
+            );
+        }
+    }
+    body.push_str(&circle(32.0, 32.0, scale * l.hub_radius));
+    format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">{body}</svg>"#)
+}
+
 fn main() {
     let icons = [
         ("propeller", icon(Kind::Propeller, json!({"max_chord": 34, "root_chord": 20, "tip_chord": 14, "hub_diameter": 30}), 2, false)),
         ("marine", icon(Kind::Marine, json!({"skew": 30}), 3, false)),
         ("wind-turbine", icon(Kind::WindTurbine, json!({"design_cl": 0.5, "hub_diameter": 160}), 3, false)),
         ("ducted-fan", icon(Kind::DuctedFan, json!({"blades": 6, "hub_diameter": 26}), 6, true)),
+        ("toroidal", toroid_icon(false, json!({"root_chord": 30, "tip_chord": 28, "hub_diameter": 44, "spread": 0.6}))),
+        ("toroidal-marine", toroid_icon(true, json!({"root_chord": 40, "tip_chord": 40, "hub_diameter": 70, "spread": 0.7}))),
     ];
     std::fs::create_dir_all("icons").expect("icons folder");
     for (name, svg) in icons {

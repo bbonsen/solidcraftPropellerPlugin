@@ -5,6 +5,7 @@
 
 pub mod blade;
 pub mod design;
+pub mod toroid;
 
 use blade::{bounds, placed, self_intersects, Station};
 use design::{pitch_at_75, Detail, Duct, DuctedFan, Marine, Propeller, Rotor, WindTurbine};
@@ -71,6 +72,8 @@ pub enum Kind {
     Marine,
     WindTurbine,
     DuctedFan,
+    Toroidal,
+    ToroidalMarine,
 }
 
 impl Kind {
@@ -80,6 +83,8 @@ impl Kind {
             "marine" => Some(Kind::Marine),
             "wind-turbine" => Some(Kind::WindTurbine),
             "ducted-fan" => Some(Kind::DuctedFan),
+            "toroidal" => Some(Kind::Toroidal),
+            "toroidal-marine" => Some(Kind::ToroidalMarine),
             _ => None,
         }
     }
@@ -117,6 +122,7 @@ fn rotation(params: &Value) -> Result<&'static str, Failure> {
 /// The rotor an entry's inputs describe, plus facts only that kind knows.
 pub fn design(kind: Kind, p: &Value) -> Result<(Rotor, Value), Failure> {
     match kind {
+        Kind::Toroidal | Kind::ToroidalMarine => Err(Failure::Input("entry", "a toroidal propeller has loops, not blades: see toroid_design".into())),
         Kind::Propeller => {
             if !matches!(rotation(p)?, "default" | "ccw" | "cw") {
                 return Err(Failure::Input("rotation", "must be ccw or cw".into()));
@@ -535,12 +541,124 @@ pub fn build_rotor(host: &mut dyn Host, rotor: &Rotor, curve: Curve) -> Result<V
     Ok(out)
 }
 
+/// A toroidal propeller's inputs.
+pub fn toroid_design(marine: bool, p: &Value) -> Result<toroid::Toroid, Failure> {
+    let mirror = match (marine, rotation(p)?) {
+        (false, "default" | "ccw") | (true, "default" | "right") => false,
+        (false, "cw") | (true, "left") => true,
+        (false, _) => return Err(Failure::Input("rotation", "must be ccw or cw".into())),
+        (true, _) => return Err(Failure::Input("rotation", "must be right or left".into())),
+    };
+    Ok(toroid::Toroid {
+        marine,
+        loops: int(p, "loops", 3)?,
+        diameter: num(p, "diameter", if marine { 250.0 } else { 254.0 })?,
+        pitch: num(p, "pitch", if marine { 250.0 } else { 114.3 })?,
+        hub_diameter: num(p, "hub_diameter", 0.0)?,
+        hub_length: num(p, "hub_length", 0.0)?,
+        bore: num(p, "bore", if marine { 0.0 } else { 5.0 })?,
+        root_chord: num(p, "root_chord", 0.0)?,
+        tip_chord: num(p, "tip_chord", 0.0)?,
+        root_thickness: num(p, "root_thickness", 0.12)?,
+        tip_thickness: num(p, "tip_thickness", if marine { 0.08 } else { 0.1 })?,
+        spread: num(p, "spread", if marine { 0.6 } else { 0.55 })?,
+        offset: num(p, "axial_offset", 0.0)?,
+        sections: int(p, "sections", 25)?,
+        points: int(p, "section_points", 14)?,
+        trailing_edge: num(p, "trailing_edge", if marine { 0.5 } else { 0.3 })?,
+        mirror,
+    })
+}
+
+/// Build a toroidal propeller: the hub, one loop (a pad at each root and a loft between them),
+/// and a circular pattern for the other loops.
+pub fn build_toroid(host: &mut dyn Host, t: &toroid::Toroid, curve: Curve) -> Result<Value, Failure> {
+    let l = t.design()?;
+    let calls = 4 + 8 + 4 * l.sections.len() + 2 + 8;
+    if calls > MAX_HOST_CALLS || l.sections.len() > 50 {
+        return Err(Failure::Input("sections", "too many sections for one plugin run".into()));
+    }
+    let body = l.name.clone();
+    let rh = l.hub_radius;
+    host.progress(0.02, "hub");
+    ring(host, &format!("{body} hub"), &body, l.hub_z.0, 2.0 * rh, t.bore, l.hub_z.1 - l.hub_z.0)?;
+    let mut features = Vec::new();
+    for (i, (angle, y0, y1, z0, z1)) in l.pads.iter().copied().enumerate() {
+        let name = format!("{body} {} pad", if i == 0 { "leading" } else { "trailing" });
+        let (o, x, y) = blade::plane(l.r_in, angle);
+        host.run("sketch.create", json!({"name": name, "plane": {"origin": pt3(o), "x_dir": pt3(x), "y_dir": pt3(y)}}))?;
+        host.run("sketch.line", json!({"points": [pt2([y0, z0]), pt2([y1, z0]), pt2([y1, z1]), pt2([y0, z1])], "closed": true}))?;
+        host.run("sketch.finish", json!({}))?;
+        host.run("solid.extrude", json!({"sketch": name, "distance": round(l.r_pad - l.r_in), "operation": "join", "targets": [body], "name": name}))?;
+        features.push(json!(name));
+    }
+    let mut names = Vec::with_capacity(l.sections.len());
+    for (j, (plane, pts)) in l.sections.iter().enumerate() {
+        if j % 8 == 0 {
+            host.progress(0.05 + 0.6 * j as f32 / l.sections.len() as f32, "sketching sections");
+            if host.cancelled() {
+                return Err(Failure::Cancelled);
+            }
+        }
+        let name = format!("{body} section {}", j + 1);
+        sketch_section(host, &name, *plane, pts, curve)?;
+        names.push(json!({"sketch": name}));
+    }
+    host.progress(0.7, "lofting the loop");
+    let loop_name = format!("{body} loop");
+    host.run("solid.loft", json!({"sections": names, "operation": "join", "targets": [body], "name": loop_name}))?;
+    features.push(json!(loop_name));
+    if t.loops > 1 {
+        host.progress(0.85, "the other loops");
+        host.run("solid.pattern.circular", json!({"features": features, "axis": "Z", "count": t.loops, "name": format!("{body} loops")}))?;
+    }
+    host.progress(1.0, "done");
+    let table: Vec<Value> = l
+        .table
+        .iter()
+        .map(|[f, r, c, a, z]| json!({"along_loop": round(*f), "r_mm": round(*r), "chord_mm": round(*c), "chord_angle_deg": round(*a), "z_mm": round(*z)}))
+        .collect();
+    Ok(json!({
+        "body": body,
+        "bodies": [body],
+        "loops": t.loops,
+        "diameter_mm": t.diameter,
+        "pitch_mm": t.pitch,
+        "pitch_ratio": t.pitch / t.diameter,
+        "pitch_inches": t.pitch / 25.4,
+        "diameter_inches": t.diameter / 25.4,
+        "hub_diameter_mm": 2.0 * rh,
+        "bore_mm": t.bore,
+        "hub_length_mm": l.hub_z.1 - l.hub_z.0,
+        "hub_z_mm": [round(l.hub_z.0), round(l.hub_z.1)],
+        "root_chord_mm": t.auto_root_chord(),
+        "tip_chord_mm": t.auto_tip_chord(),
+        "spread_deg": t.spread * 360.0 / f64::from(t.loops),
+        "axial_extent_mm": [round(l.axial_extent.0), round(l.axial_extent.1)],
+        "rotation": match (t.marine, t.mirror) { (false, false) => "ccw", (false, true) => "cw", (true, false) => "right", (true, true) => "left" },
+        "rotation_note": if t.marine {
+            "right hand turns clockwise seen from astern (from -Z) when going ahead; ahead is +Z"
+        } else {
+            "seen from the front (+Z, the way the thrust points); the propeller pushes air towards -Z"
+        },
+        "loop_note": "each loop leaves the hub forward and ahead (its leading root) and returns aft and behind (its trailing root); the sections are symmetric airfoils, their chords following the pitch helix and turning through axial at the tip",
+        "sections": table,
+        "section_points": 2 * t.points + 1,
+        "axis_note": "the rotor turns about the Z axis through the origin; loop 1 is centred on +X",
+        "warnings": l.warnings,
+    }))
+}
+
 /// Build an entry. `params` is the entry's JSON input.
 pub fn build(host: &mut dyn Host, kind: Kind, params: &Value) -> Result<Value, Failure> {
     let curve = match choice(params, "section_curve", &["spline", "polyline"])? {
         0 => Curve::Spline,
         _ => Curve::Polyline,
     };
+    if matches!(kind, Kind::Toroidal | Kind::ToroidalMarine) {
+        let t = toroid_design(kind == Kind::ToroidalMarine, params)?;
+        return build_toroid(host, &t, curve);
+    }
     let (rotor, facts) = design(kind, params)?;
     let mut out = build_rotor(host, &rotor, curve)?;
     if let (Some(o), Value::Object(f)) = (out.as_object_mut(), facts) {
@@ -642,6 +760,30 @@ mod tests {
     }
 
     #[test]
+    fn toroidal_entries_build_one_loop_and_pattern_it() {
+        for (kind, extrudes) in [(Kind::Toroidal, 3), (Kind::ToroidalMarine, 3)] {
+            let (h, r) = run(kind, json!({}));
+            let out = r.unwrap_or_else(|e| panic!("{kind:?}: {e:?}"));
+            assert_eq!(count(&h, "solid.loft"), 1, "{kind:?}");
+            assert_eq!(count(&h, "solid.extrude"), extrudes, "{kind:?}");
+            assert_eq!(count(&h, "sketch.create"), count(&h, "sketch.finish"));
+            let pattern = &h.0.iter().find(|(c, _)| c == "solid.pattern.circular").unwrap_or_else(|| panic!("{kind:?}")).1;
+            assert_eq!(pattern["count"], json!(3));
+            // Both pads and the loop are patterned.
+            assert_eq!(pattern["features"].as_array().map(Vec::len), Some(3));
+            let loft = &h.0.iter().find(|(c, _)| c == "solid.loft").unwrap_or_else(|| panic!("{kind:?}")).1;
+            assert_eq!(loft["sections"].as_array().map(Vec::len), Some(25));
+            assert_eq!(loft["operation"], json!("join"));
+            assert_eq!(out["loops"], json!(3));
+            assert!(h.0.len() + 8 < MAX_HOST_CALLS, "{kind:?}: {} calls", h.0.len());
+        }
+        let (_, r) = run(Kind::Toroidal, json!({"rotation": "right"}));
+        assert!(matches!(r, Err(Failure::Input("rotation", _))));
+        let (_, r) = run(Kind::ToroidalMarine, json!({"rotation": "cw"}));
+        assert!(matches!(r, Err(Failure::Input("rotation", _))));
+    }
+
+    #[test]
     fn propeller_calls_in_order() {
         let (h, r) = run(Kind::Propeller, json!({"sections": 5}));
         r.unwrap();
@@ -696,8 +838,9 @@ mod tests {
 
     #[test]
     fn the_most_sections_stay_within_the_host_call_limit() {
-        for kind in [Kind::Propeller, Kind::Marine, Kind::DuctedFan, Kind::WindTurbine] {
-            let (h, r) = run(kind, json!({"sections": 40, "section_points": 60}));
+        for kind in [Kind::Propeller, Kind::Marine, Kind::DuctedFan, Kind::WindTurbine, Kind::Toroidal, Kind::ToroidalMarine] {
+            let sections = if matches!(kind, Kind::Toroidal | Kind::ToroidalMarine) { 45 } else { 40 };
+            let (h, r) = run(kind, json!({"sections": sections, "section_points": 60}));
             match r {
                 Ok(_) => assert!(h.0.len() + 8 <= MAX_HOST_CALLS, "{kind:?}: {}", h.0.len()),
                 Err(Failure::Input("sections", _)) => assert!(h.0.is_empty()),

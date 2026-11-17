@@ -1,6 +1,6 @@
 [package]
 name = "propellers"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "Propeller, marine propeller, wind turbine and ducted fan generator plugin for SolidCraft (craft:plugin@0.1.0)"

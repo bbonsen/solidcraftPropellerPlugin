@@ -1,6 +1,6 @@
 # Propellers: a SolidCraft plugin
 
-Makes propellers and rotors in SolidCraft. It adds four commands to the Plugins group on the
+Makes propellers and rotors in SolidCraft. It adds six commands to the Plugins group on the
 Model tab and to the Plugins menu. You fill in a form; the plugin works out each blade's
 airfoil sections from the radius out to the tip, then builds the rotor with ordinary SolidCraft
 commands:
@@ -11,6 +11,8 @@ commands:
 | `marine` | Outboard and inboard engines, boats, ROV thrusters | The same, with Wageningen B-series blade outline and thickness, skew and rake |
 | `wind-turbine` | Small horizontal-axis wind turbines | The same, with blades shaped by Schmitz's optimum and a round root; or one blade on its own |
 | `ducted-fan` | EDF units, cooling and blower fans | The same, with many blades, plus a duct ring around the tips as its own body |
+| `toroidal` | Quiet drone and fan propellers | Closed loops instead of blades: one loop lofted between two root pads, patterned |
+| `toroidal-marine` | Outboards, boats and thrusters with looped blades | The same, with wider loops sized for water |
 
 The result is ordinary editable features (sketches, extrudes, a loft and a circular pattern), so
 you can modify it later: change the pattern's count, say, or edit a section sketch. The whole
@@ -22,13 +24,13 @@ run is a single undo step. The plugin needs no file, network or settings access.
 
 **Requires SolidCraft 0.43.0 or later.**
 
-Download `propellers-0.1.0.zip` from the
+Download `propellers-0.2.0.zip` from the
 [latest release](https://github.com/bbonsen/solidcraftPropellerPlugin/releases/latest). In
 SolidCraft (desktop), open **Preferences > Plugins > Install plugin…** and pick it. It asks for
 no permissions. You can also install it from a script:
 
 ```json
-[{"command":"plugin.install","params":{"path":"propellers-0.1.0.zip"}}]
+[{"command":"plugin.install","params":{"path":"propellers-0.2.0.zip"}}]
 ```
 
 To upgrade an earlier version by script, add `"replace": true`.
@@ -41,6 +43,8 @@ To upgrade an earlier version by script, add `"replace": true`.
 | `marine` | Marine propeller | Marine |
 | `wind-turbine` | Wind turbine rotor | Wind turbine |
 | `ducted-fan` | Ducted fan | Ducted fan |
+| `toroidal` | Toroidal propeller | Toroidal |
+| `toroidal-marine` | Toroidal marine propeller | Toroidal marine |
 
 As with the [Gears](https://github.com/bbonsen/solidcraftGearsPlugin) plugin, each entry's
 `menu` slot names the command and its `ribbon` slot gives the button's label. SolidCraft does
@@ -193,6 +197,57 @@ itself in the hub. The reply gives the design rpm, ω = λ·V/R, at `wind_speed`
 Fans default to 8 sections of 10 points a side: their blades are short, and it keeps the run
 quick.
 
+## Toroidal propellers (entries `toroidal` and `toroidal-marine`)
+
+![A toroidal air propeller and a toroidal marine propeller](preview-toroidal.png)
+
+A toroidal propeller replaces each blade with a closed loop. The loop's **leading arm** leaves the
+hub forward (+Z) and ahead in the direction of rotation, runs out to a **tip bridge**, and comes
+back to the hub as the **trailing arm**, aft and behind. With no free blade tip, there is no
+concentrated tip vortex; such propellers are reported to be markedly quieter in air, and are
+sold for boats as well.
+
+| Field | `toroidal` | `toroidal-marine` | Meaning |
+|---|---|---|---|
+| `loops` | 3 | 3 | 2–8 (air), 2–6 (marine) |
+| `diameter` | 254 | 250 | mm, across the loops' outer edges |
+| `pitch` | 114.3 | 250 | Geometric pitch, mm |
+| `rotation` | ccw | right | As for `propeller` and `marine` respectively |
+| `spread` | 0.55 | 0.6 | The angle between a loop's two roots, as a fraction of the spacing between loops (0.2–0.9). Wider makes rounder loops |
+| `axial_offset` | 0 | 0 | Axial distance between a loop's two roots, mm. 0 = the root chord |
+| `root_chord` | 0 | 0 | mm. 0 = 10% (air) or 15% (marine) of the diameter |
+| `tip_chord` | 0 | 0 | Chord across the tip bridge, mm. 0 = 60% of the root chord |
+| `root_thickness`, `tip_thickness` | 0.12, 0.1 | 0.12, 0.08 | Fraction of the chord |
+| `hub_diameter` | 0 | 0 | 0 = 12% (air) or 24% (marine) of the diameter |
+| `bore` | 5 | 0 | mm |
+| `sections` | 25 | 25 | Sections round the loop, 9–45 |
+
+`hub_length`, `trailing_edge` and `section_points` work as for the other entries.
+
+How the loop is drawn:
+
+- **The centreline** rises from the hub as √sin(πt) of the way round, so both arms leave the hub
+  radially, and moves smoothly from the leading root's angle and axial position to the trailing
+  root's. Its outer edge is at the diameter.
+- **Each section** is square to the centreline. Its chord takes the blade angle of the pitch,
+  atan(pitch / 2πr), scaled by how far the section's width runs along the direction of rotation:
+  so on each arm the chord lies at the blade angle with its leading edge towards the direction of
+  travel, and across the tip bridge the chord turns through axial. Both arms meet the air leading
+  edge first.
+- **The sections are symmetric (NACA 00xx).** As the chord turns through axial, the section's
+  two faces swap sides: the face on top of the leading arm is underneath on the trailing arm. A
+  cambered airfoil would be cambered the wrong way on one of them, so the loop has no `camber`
+  input.
+- **Both roots stand on root pads**, like the other entries' blades, and the loop is one loft
+  joined to the hub between them. A circular pattern of the two pads and the loop makes the
+  other loops.
+
+The entry refuses a design whose loop roots would cross: a loop's own two roots (make `spread`
+or `axial_offset` larger, or the root chord smaller) or neighbouring loops' roots (make `spread`
+smaller or use fewer loops). It does not optimise the loop's shape aerodynamically; the
+published designs differ in sweep, loop shape and section, so treat the result as a starting
+point to tune and test.
+
 ## The reply
 
 Every entry returns the bodies it made, the diameter, hub and bore sizes, the pitch and blade
@@ -206,7 +261,7 @@ neighbouring blade roots overlap at the hub.
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install wasm-tools
-./build.sh          # tests, builds the component, writes propellers-0.1.0.zip
+./build.sh          # tests, builds the component, writes propellers-0.2.0.zip
 ```
 
 `host-check/` runs the packaged component inside SolidCraft's real plugin runtime crate
@@ -234,10 +289,13 @@ Tested against SolidCraft 0.43.0's own code, but not yet in the desktop app:
   within the runtime's limit of 256 host calls per run.
 - The packaged plugin was installed (`plugin.install`, dry run) and run (`plugin.run`) by
   SolidCraft's headless CLI against its real kernel: every entry's defaults build closed,
-  single-shell solids in 3–4 s.
-- 48 randomly chosen designs (12 of each kind, across blade counts, sizes, pitches, area ratios,
-  skew, rake, tip speed ratios, rotations, bores and ducts) all build as closed, single-shell
-  solids, each in 1–7 s.
+  single-shell solids in 3–6 s.
+- 48 randomly chosen designs (12 of each bladed kind, across blade counts, sizes, pitches, area
+  ratios, skew, rake, tip speed ratios, rotations, bores and ducts) all build as closed,
+  single-shell solids, each in 1–7 s.
+- 48 randomly chosen toroidal designs (24 air, 24 marine, across loop counts, sizes, pitches,
+  spreads, offsets, thicknesses and rotations): 43 build as closed, single-shell solids in 3–10 s,
+  and 5 are refused before any command because their loop roots would cross.
 
 A run must finish within SolidCraft's 30 s plugin deadline, which includes the kernel's work. If a
 large or many-bladed rotor runs out of time on a slow computer, lower `sections` or
