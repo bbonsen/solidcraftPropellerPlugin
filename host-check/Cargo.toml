@@ -1,0 +1,12 @@
+[package]
+name = "host-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+craft-plugin = { path = "../../solidcraft/crates/craft-plugin" }
+craft-plugin-wasm = { path = "../../solidcraft/crates/craft-plugin-wasm" }
+serde_json = "1"
